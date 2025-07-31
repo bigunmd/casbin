@@ -17,6 +17,7 @@ import (
 const (
 	defaultTableName = "casbin_rule"
 	defaultTimeout   = 4 * time.Second
+	defaultBatchSize = 1000
 )
 
 type casbinRule struct {
@@ -39,8 +40,7 @@ type PgConn interface {
 
 var _ persist.Adapter = (*Adapter)(nil)
 var _ persist.ContextAdapter = (*Adapter)(nil)
-
-// var _ persist.BatchAdapter = (*Adapter)(nil)
+var _ persist.BatchAdapter = (*Adapter)(nil)
 
 type Option func(*Adapter) error
 
@@ -66,11 +66,83 @@ func WithTimeout(timeout time.Duration) Option {
 	}
 }
 
+func WithBatchSize(batchSize uint) Option {
+	return func(a *Adapter) error {
+		if batchSize == 0 {
+			return errors.New("must provide valid batch size")
+		}
+		a.batchSize = batchSize
+
+		return nil
+	}
+}
+
 type Adapter struct {
 	conn       PgConn
 	tableName  string
 	timeout    time.Duration
+	batchSize  uint
 	isFiltered bool
+}
+
+func (a *Adapter) addPolicies(ctx context.Context, sec string, ptype string, rules [][]string) error {
+	var lines []casbinRule
+	for _, rule := range rules {
+		lines = append(lines, a.savePolicyLine(ptype, rule))
+	}
+	fmt.Printf("lines: %v\n", lines)
+
+	for i := 0; i < len(lines); i += int(a.batchSize) {
+		end := i + int(a.batchSize)
+		if end > len(lines) {
+			end = len(lines)
+		}
+		batch := lines[i:end]
+		fmt.Printf("len(batch): %v\n", len(batch))
+
+		sqb := sq.Insert(a.tableName).
+			Columns(
+				"ptype",
+				"v0",
+				"v1",
+				"v2",
+				"v3",
+				"v4",
+				"v5",
+			).Suffix("ON CONFLICT DO NOTHING")
+		for _, line := range batch {
+			sqb = sqb.Values(
+				line.Ptype,
+				line.V0,
+				line.V1,
+				line.V2,
+				line.V3,
+				line.V4,
+				line.V5,
+			)
+		}
+		sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
+		if err != nil {
+			return fmt.Errorf("cannot create insert policy rules query: %w", err)
+		}
+		if _, err := a.conn.Exec(ctx, sql, arguments...); err != nil {
+			return fmt.Errorf("cannot execute insert policy rules query: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// AddPolicies implements persist.BatchAdapter.
+func (a *Adapter) AddPolicies(sec string, ptype string, rules [][]string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.addPolicies(ctx, sec, ptype, rules)
+}
+
+// RemovePolicies implements persist.BatchAdapter.
+func (a *Adapter) RemovePolicies(sec string, ptype string, rules [][]string) error {
+	panic("unimplemented")
 }
 
 // AddPolicyCtx implements persist.ContextAdapter.
@@ -226,6 +298,7 @@ func (a *Adapter) loadPolicy(ctx context.Context, model model.Model) error {
 			return fmt.Errorf("cannot load policy line: %w", err)
 		}
 	}
+	fmt.Printf("len(rules): %v\n", len(rules))
 
 	return nil
 }
@@ -492,6 +565,7 @@ func New(ctx context.Context, conn PgConn, opts ...Option) (*Adapter, error) {
 		conn:      conn,
 		tableName: defaultTableName,
 		timeout:   defaultTimeout,
+		batchSize: defaultBatchSize,
 	}
 
 	for _, opt := range opts {
