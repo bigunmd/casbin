@@ -85,12 +85,12 @@ func (a *Adapter) LoadPolicyCtx(ctx context.Context, model model.Model) error {
 
 // RemoveFilteredPolicyCtx implements persist.ContextAdapter.
 func (a *Adapter) RemoveFilteredPolicyCtx(ctx context.Context, sec string, ptype string, fieldIndex int, fieldValues ...string) error {
-	panic("unimplemented")
+	return a.removeFilteredPolicy(ctx, sec, ptype, fieldIndex, fieldValues...)
 }
 
 // RemovePolicyCtx implements persist.ContextAdapter.
 func (a *Adapter) RemovePolicyCtx(ctx context.Context, sec string, ptype string, rule []string) error {
-	panic("unimplemented")
+	return a.removePolicy(ctx, sec, ptype, rule)
 }
 
 // SavePolicyCtx implements persist.ContextAdapter.
@@ -237,14 +237,127 @@ func (a *Adapter) LoadPolicy(model model.Model) error {
 	return a.loadPolicy(ctx, model)
 }
 
+func checkFieldValues(fieldValues ...string) error {
+	for _, fv := range fieldValues {
+		if fv != "" {
+			return nil
+		}
+	}
+
+	return errors.New("must provide at least one non empty field value")
+}
+
+func (a *Adapter) removeFilteredPolicy(ctx context.Context, sec string, ptype string, fieldIndex int, fieldValues ...string) error {
+	var line casbinRule
+	line.Ptype = pgtype.Text{
+		String: ptype,
+		Valid:  true,
+	}
+
+	if fieldIndex == -1 {
+		return a.rawDelete(ctx, line)
+	}
+
+	if err := checkFieldValues(fieldValues...); err != nil {
+		return fmt.Errorf("cannot check field values: %w", err)
+	}
+
+	if fieldIndex <= 0 && 0 < fieldIndex+len(fieldValues) {
+		line.V0 = pgtype.Text{
+			String: fieldValues[0-fieldIndex],
+			Valid:  true,
+		}
+	}
+	if fieldIndex <= 1 && 1 < fieldIndex+len(fieldValues) {
+		line.V1 = pgtype.Text{
+			String: fieldValues[1-fieldIndex],
+			Valid:  true,
+		}
+	}
+	if fieldIndex <= 2 && 2 < fieldIndex+len(fieldValues) {
+		line.V2 = pgtype.Text{
+			String: fieldValues[2-fieldIndex],
+			Valid:  true,
+		}
+	}
+	if fieldIndex <= 3 && 3 < fieldIndex+len(fieldValues) {
+		line.V3 = pgtype.Text{
+			String: fieldValues[3-fieldIndex],
+			Valid:  true,
+		}
+	}
+	if fieldIndex <= 4 && 4 < fieldIndex+len(fieldValues) {
+		line.V4 = pgtype.Text{
+			String: fieldValues[4-fieldIndex],
+			Valid:  true,
+		}
+	}
+	if fieldIndex <= 5 && 5 < fieldIndex+len(fieldValues) {
+		line.V5 = pgtype.Text{
+			String: fieldValues[5-fieldIndex],
+			Valid:  true,
+		}
+	}
+
+	if err := a.rawDelete(ctx, line); err != nil {
+		return fmt.Errorf("cannot raw delete line: %w", err)
+	}
+
+	return nil
+}
+
 // RemoveFilteredPolicy implements persist.Adapter.
 func (a *Adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
-	panic("unimplemented")
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.removeFilteredPolicy(ctx, sec, ptype, fieldIndex, fieldValues...)
+}
+
+func (a *Adapter) rawDelete(ctx context.Context, line casbinRule) error {
+	sqb := sq.Delete(a.tableName).Where(sq.Eq{"ptype": line.Ptype.String})
+	if line.V0.String != "" {
+		sqb = sqb.Where(sq.Eq{"v0": line.V0.String})
+	}
+	if line.V1.String != "" {
+		sqb = sqb.Where(sq.Eq{"v1": line.V1.String})
+	}
+	if line.V2.String != "" {
+		sqb = sqb.Where(sq.Eq{"V2": line.V2.String})
+	}
+	if line.V3.String != "" {
+		sqb = sqb.Where(sq.Eq{"V3": line.V3.String})
+	}
+	if line.V4.String != "" {
+		sqb = sqb.Where(sq.Eq{"V4": line.V4.String})
+	}
+	if line.V5.String != "" {
+		sqb = sqb.Where(sq.Eq{"V5": line.V5.String})
+	}
+	sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
+	if err != nil {
+		return fmt.Errorf("cannot build delete policy rule query: %w", err)
+	}
+	if _, err := a.conn.Exec(ctx, sql, arguments...); err != nil {
+		return fmt.Errorf("cannot execute delete policy rule query: %w", err)
+	}
+
+	return nil
+}
+
+func (a *Adapter) removePolicy(ctx context.Context, sec string, ptype string, rule []string) error {
+	line := a.savePolicyLine(ptype, rule)
+	if err := a.rawDelete(ctx, line); err != nil {
+		return fmt.Errorf("cannot raw delete line: %w", err)
+	}
+
+	return nil
 }
 
 // RemovePolicy implements persist.Adapter.
 func (a *Adapter) RemovePolicy(sec string, ptype string, rule []string) error {
-	panic("unimplemented")
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.removePolicy(ctx, sec, ptype, rule)
 }
 
 func (a *Adapter) truncateTable(ctx context.Context) error {
