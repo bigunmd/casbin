@@ -11,7 +11,6 @@ import (
 	"github.com/casbin/casbin/v2/persist"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const (
@@ -21,14 +20,28 @@ const (
 )
 
 type casbinRule struct {
-	ID    uint        `db:"id"`
-	Ptype pgtype.Text `db:"ptype"`
-	V0    pgtype.Text `db:"v0"`
-	V1    pgtype.Text `db:"v1"`
-	V2    pgtype.Text `db:"v2"`
-	V3    pgtype.Text `db:"v3"`
-	V4    pgtype.Text `db:"v4"`
-	V5    pgtype.Text `db:"v5"`
+	ID    uint   `db:"id"`
+	Ptype string `db:"ptype"`
+	V0    string `db:"v0"`
+	V1    string `db:"v1"`
+	V2    string `db:"v2"`
+	V3    string `db:"v3"`
+	V4    string `db:"v4"`
+	V5    string `db:"v5"`
+}
+
+type filter struct {
+	Ptype []string
+	V0    []string
+	V1    []string
+	V2    []string
+	V3    []string
+	V4    []string
+	V5    []string
+}
+
+type batchFilter struct {
+	filters []filter
 }
 
 type PgConn interface {
@@ -42,9 +55,9 @@ var _ persist.Adapter = (*Adapter)(nil)
 var _ persist.ContextAdapter = (*Adapter)(nil)
 var _ persist.BatchAdapter = (*Adapter)(nil)
 var _ persist.ContextBatchAdapter = (*Adapter)(nil)
+var _ persist.FilteredAdapter = (*Adapter)(nil)
+var _ persist.ContextFilteredAdapter = (*Adapter)(nil)
 
-// var _ persist.FilteredAdapter
-// var _ persist.ContextFilteredAdapter
 // var _ persist.UpdatableAdapter
 // var _ persist.ContextUpdatableAdapter
 
@@ -89,6 +102,105 @@ type Adapter struct {
 	timeout    time.Duration
 	batchSize  uint
 	isFiltered bool
+}
+
+// IsFilteredCtx implements persist.ContextFilteredAdapter.
+func (a *Adapter) IsFilteredCtx(ctx context.Context) bool {
+	return a.isFiltered
+}
+
+// LoadFilteredPolicyCtx implements persist.ContextFilteredAdapter.
+func (a *Adapter) LoadFilteredPolicyCtx(ctx context.Context, model model.Model, filter interface{}) error {
+	return a.loadFilteredPolicy(ctx, model, filter)
+}
+
+// IsFiltered implements persist.FilteredAdapter.
+func (a *Adapter) IsFiltered() bool {
+	return a.isFiltered
+}
+
+func (a *Adapter) loadFilteredPolicy(ctx context.Context, model model.Model, filt interface{}) error {
+	bf := batchFilter{
+		filters: []filter{},
+	}
+	switch filterValue := filt.(type) {
+	case filter:
+		bf.filters = []filter{filterValue}
+	case *filter:
+		bf.filters = []filter{*filterValue}
+	case []filter:
+		bf.filters = filterValue
+	case batchFilter:
+		bf = filterValue
+	case *batchFilter:
+		bf = *filterValue
+	default:
+		return errors.New("unsupported filter type")
+	}
+
+	for _, f := range bf.filters {
+		sqb := sq.Select(
+			"id",
+			"ptype",
+			"v0",
+			"v1",
+			"v2",
+			"v3",
+			"v4",
+			"v5",
+		).From(a.tableName).OrderBy("id")
+		if len(f.Ptype) > 0 {
+			sqb = sqb.Where(sq.Eq{"ptype": f.Ptype})
+		}
+		if len(f.V0) > 0 {
+			sqb = sqb.Where(sq.Eq{"V0": f.V0})
+		}
+		if len(f.V1) > 0 {
+			sqb = sqb.Where(sq.Eq{"V1": f.V1})
+		}
+		if len(f.V2) > 0 {
+			sqb = sqb.Where(sq.Eq{"V2": f.V2})
+		}
+		if len(f.V3) > 0 {
+			sqb = sqb.Where(sq.Eq{"V3": f.V3})
+		}
+		if len(f.V4) > 0 {
+			sqb = sqb.Where(sq.Eq{"V4": f.V4})
+		}
+		if len(f.V5) > 0 {
+			sqb = sqb.Where(sq.Eq{"V5": f.V5})
+		}
+		sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
+		if err != nil {
+			return fmt.Errorf("cannot create select filtered casbin rule query: %w", err)
+		}
+		rows, err := a.conn.Query(ctx, sql, arguments...)
+		if err != nil {
+			return fmt.Errorf("cannot execute select filtered casbin rule query: %w", err)
+		}
+		rules, err := pgx.CollectRows(rows, pgx.RowToStructByName[casbinRule])
+		if err != nil {
+			return fmt.Errorf("cannot collect rows: %w", err)
+		}
+		if err := a.preview(rules, model); err != nil {
+			return fmt.Errorf("cannot preview policy rules: %w", err)
+		}
+		for _, r := range rules {
+			if err := loadPolicyLine(r, model); err != nil {
+				return fmt.Errorf("cannot load policy line: %w", err)
+			}
+		}
+	}
+	a.isFiltered = true
+
+	return nil
+}
+
+// LoadFilteredPolicy implements persist.FilteredAdapter.
+func (a *Adapter) LoadFilteredPolicy(model model.Model, filter interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.loadFilteredPolicy(ctx, model, filter)
 }
 
 // AddPoliciesCtx implements persist.ContextBatchAdapter.
@@ -238,13 +350,13 @@ func (a *Adapter) preview(rules []casbinRule, model model.Model) error {
 	j := 0
 	for i, rule := range rules {
 		r := []string{
-			rule.Ptype.String,
-			rule.V0.String,
-			rule.V1.String,
-			rule.V2.String,
-			rule.V3.String,
-			rule.V4.String,
-			rule.V5.String,
+			rule.Ptype,
+			rule.V0,
+			rule.V1,
+			rule.V2,
+			rule.V3,
+			rule.V4,
+			rule.V5,
 		}
 		index := len(r) - 1
 		for r[index] == "" {
@@ -270,13 +382,13 @@ func (a *Adapter) preview(rules []casbinRule, model model.Model) error {
 
 func loadPolicyLine(r casbinRule, model model.Model) error {
 	var p = []string{
-		r.Ptype.String,
-		r.V0.String,
-		r.V1.String,
-		r.V2.String,
-		r.V3.String,
-		r.V4.String,
-		r.V5.String,
+		r.Ptype,
+		r.V0,
+		r.V1,
+		r.V2,
+		r.V3,
+		r.V4,
+		r.V5,
 	}
 
 	index := len(p) - 1
@@ -324,7 +436,6 @@ func (a *Adapter) loadPolicy(ctx context.Context, model model.Model) error {
 			return fmt.Errorf("cannot load policy line: %w", err)
 		}
 	}
-	fmt.Printf("len(rules): %v\n", len(rules))
 
 	return nil
 }
@@ -348,10 +459,7 @@ func checkFieldValues(fieldValues ...string) error {
 
 func (a *Adapter) removeFilteredPolicy(ctx context.Context, sec string, ptype string, fieldIndex int, fieldValues ...string) error {
 	var line casbinRule
-	line.Ptype = pgtype.Text{
-		String: ptype,
-		Valid:  true,
-	}
+	line.Ptype = ptype
 
 	if fieldIndex == -1 {
 		return a.rawDelete(ctx, line)
@@ -362,40 +470,22 @@ func (a *Adapter) removeFilteredPolicy(ctx context.Context, sec string, ptype st
 	}
 
 	if fieldIndex <= 0 && 0 < fieldIndex+len(fieldValues) {
-		line.V0 = pgtype.Text{
-			String: fieldValues[0-fieldIndex],
-			Valid:  true,
-		}
+		line.V0 = fieldValues[0-fieldIndex]
 	}
 	if fieldIndex <= 1 && 1 < fieldIndex+len(fieldValues) {
-		line.V1 = pgtype.Text{
-			String: fieldValues[1-fieldIndex],
-			Valid:  true,
-		}
+		line.V1 = fieldValues[1-fieldIndex]
 	}
 	if fieldIndex <= 2 && 2 < fieldIndex+len(fieldValues) {
-		line.V2 = pgtype.Text{
-			String: fieldValues[2-fieldIndex],
-			Valid:  true,
-		}
+		line.V2 = fieldValues[2-fieldIndex]
 	}
 	if fieldIndex <= 3 && 3 < fieldIndex+len(fieldValues) {
-		line.V3 = pgtype.Text{
-			String: fieldValues[3-fieldIndex],
-			Valid:  true,
-		}
+		line.V3 = fieldValues[3-fieldIndex]
 	}
 	if fieldIndex <= 4 && 4 < fieldIndex+len(fieldValues) {
-		line.V4 = pgtype.Text{
-			String: fieldValues[4-fieldIndex],
-			Valid:  true,
-		}
+		line.V4 = fieldValues[4-fieldIndex]
 	}
 	if fieldIndex <= 5 && 5 < fieldIndex+len(fieldValues) {
-		line.V5 = pgtype.Text{
-			String: fieldValues[5-fieldIndex],
-			Valid:  true,
-		}
+		line.V5 = fieldValues[5-fieldIndex]
 	}
 
 	if err := a.rawDelete(ctx, line); err != nil {
@@ -413,24 +503,24 @@ func (a *Adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int,
 }
 
 func (a *Adapter) rawDelete(ctx context.Context, line casbinRule) error {
-	sqb := sq.Delete(a.tableName).Where(sq.Eq{"ptype": line.Ptype.String})
-	if line.V0.String != "" {
-		sqb = sqb.Where(sq.Eq{"v0": line.V0.String})
+	sqb := sq.Delete(a.tableName).Where(sq.Eq{"ptype": line.Ptype})
+	if line.V0 != "" {
+		sqb = sqb.Where(sq.Eq{"v0": line.V0})
 	}
-	if line.V1.String != "" {
-		sqb = sqb.Where(sq.Eq{"v1": line.V1.String})
+	if line.V1 != "" {
+		sqb = sqb.Where(sq.Eq{"v1": line.V1})
 	}
-	if line.V2.String != "" {
-		sqb = sqb.Where(sq.Eq{"V2": line.V2.String})
+	if line.V2 != "" {
+		sqb = sqb.Where(sq.Eq{"V2": line.V2})
 	}
-	if line.V3.String != "" {
-		sqb = sqb.Where(sq.Eq{"V3": line.V3.String})
+	if line.V3 != "" {
+		sqb = sqb.Where(sq.Eq{"V3": line.V3})
 	}
-	if line.V4.String != "" {
-		sqb = sqb.Where(sq.Eq{"V4": line.V4.String})
+	if line.V4 != "" {
+		sqb = sqb.Where(sq.Eq{"V4": line.V4})
 	}
-	if line.V5.String != "" {
-		sqb = sqb.Where(sq.Eq{"V5": line.V5.String})
+	if line.V5 != "" {
+		sqb = sqb.Where(sq.Eq{"V5": line.V5})
 	}
 	sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
@@ -469,45 +559,24 @@ func (a *Adapter) truncateTable(ctx context.Context) error {
 
 func (a *Adapter) savePolicyLine(ptype string, rule []string) casbinRule {
 	var line casbinRule
-	line.Ptype = pgtype.Text{
-		String: ptype,
-		Valid:  true,
-	}
+	line.Ptype = ptype
 	if len(rule) > 0 {
-		line.V0 = pgtype.Text{
-			String: rule[0],
-			Valid:  true,
-		}
+		line.V0 = rule[0]
 	}
 	if len(rule) > 1 {
-		line.V1 = pgtype.Text{
-			String: rule[1],
-			Valid:  true,
-		}
+		line.V1 = rule[1]
 	}
 	if len(rule) > 2 {
-		line.V2 = pgtype.Text{
-			String: rule[2],
-			Valid:  true,
-		}
+		line.V2 = rule[2]
 	}
 	if len(rule) > 3 {
-		line.V3 = pgtype.Text{
-			String: rule[3],
-			Valid:  true,
-		}
+		line.V3 = rule[3]
 	}
 	if len(rule) > 4 {
-		line.V4 = pgtype.Text{
-			String: rule[4],
-			Valid:  true,
-		}
+		line.V4 = rule[4]
 	}
 	if len(rule) > 5 {
-		line.V5 = pgtype.Text{
-			String: rule[5],
-			Valid:  true,
-		}
+		line.V5 = rule[5]
 	}
 
 	return line
@@ -533,13 +602,13 @@ func (a *Adapter) savePolicy(ctx context.Context, model model.Model) error {
 	var rows [][]any
 	for _, line := range lines {
 		rows = append(rows, []any{
-			line.Ptype.String,
-			line.V0.String,
-			line.V1.String,
-			line.V2.String,
-			line.V3.String,
-			line.V4.String,
-			line.V5.String,
+			line.Ptype,
+			line.V0,
+			line.V1,
+			line.V2,
+			line.V3,
+			line.V4,
+			line.V5,
 		})
 	}
 
@@ -569,14 +638,15 @@ func (a *Adapter) createTable(ctx context.Context) error {
 	if _, err := a.conn.Exec(ctx, fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		id BIGSERIAL,
-		ptype VARCHAR(32),
-		v0 VARCHAR(255), 
-		v1 VARCHAR(255), 
-		v2 VARCHAR(255), 
-		v3 VARCHAR(255), 
-		v4 VARCHAR(255), 
-		v5 VARCHAR(255),
-		PRIMARY KEY (id)
+		ptype VARCHAR(32) NOT NULL,
+		v0 VARCHAR(255) NOT NULL DEFAULT '', 
+		v1 VARCHAR(255) NOT NULL DEFAULT '', 
+		v2 VARCHAR(255) NOT NULL DEFAULT '', 
+		v3 VARCHAR(255) NOT NULL DEFAULT '', 
+		v4 VARCHAR(255) NOT NULL DEFAULT '', 
+		v5 VARCHAR(255) NOT NULL DEFAULT '',
+		PRIMARY KEY (id),
+		UNIQUE (ptype,v0,v1,v2,v3,v4,v5)
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_%s ON %s (ptype,v0,v1,v2,v3,v4,v5);
 	`, a.tableName, a.tableName, a.tableName)); err != nil {
@@ -603,6 +673,16 @@ func New(ctx context.Context, conn PgConn, opts ...Option) (*Adapter, error) {
 	if err := a.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("cannot create table: %w", err)
 	}
+
+	return a, nil
+}
+
+func NewFiltered(ctx context.Context, conn PgConn, opts ...Option) (*Adapter, error) {
+	a, err := New(ctx, conn, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create adapter: %w", err)
+	}
+	a.isFiltered = true
 
 	return a, nil
 }
