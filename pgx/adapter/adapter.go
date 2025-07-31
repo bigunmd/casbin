@@ -41,6 +41,12 @@ type PgConn interface {
 var _ persist.Adapter = (*Adapter)(nil)
 var _ persist.ContextAdapter = (*Adapter)(nil)
 var _ persist.BatchAdapter = (*Adapter)(nil)
+var _ persist.ContextBatchAdapter = (*Adapter)(nil)
+
+// var _ persist.FilteredAdapter
+// var _ persist.ContextFilteredAdapter
+// var _ persist.UpdatableAdapter
+// var _ persist.ContextUpdatableAdapter
 
 type Option func(*Adapter) error
 
@@ -85,12 +91,21 @@ type Adapter struct {
 	isFiltered bool
 }
 
+// AddPoliciesCtx implements persist.ContextBatchAdapter.
+func (a *Adapter) AddPoliciesCtx(ctx context.Context, sec string, ptype string, rules [][]string) error {
+	return a.addPolicies(ctx, sec, ptype, rules)
+}
+
+// RemovePoliciesCtx implements persist.ContextBatchAdapter.
+func (a *Adapter) RemovePoliciesCtx(ctx context.Context, sec string, ptype string, rules [][]string) error {
+	return a.removePolicies(ctx, sec, ptype, rules)
+}
+
 func (a *Adapter) addPolicies(ctx context.Context, sec string, ptype string, rules [][]string) error {
 	var lines []casbinRule
 	for _, rule := range rules {
 		lines = append(lines, a.savePolicyLine(ptype, rule))
 	}
-	fmt.Printf("lines: %v\n", lines)
 
 	for i := 0; i < len(lines); i += int(a.batchSize) {
 		end := i + int(a.batchSize)
@@ -98,7 +113,6 @@ func (a *Adapter) addPolicies(ctx context.Context, sec string, ptype string, rul
 			end = len(lines)
 		}
 		batch := lines[i:end]
-		fmt.Printf("len(batch): %v\n", len(batch))
 
 		sqb := sq.Insert(a.tableName).
 			Columns(
@@ -140,9 +154,21 @@ func (a *Adapter) AddPolicies(sec string, ptype string, rules [][]string) error 
 	return a.addPolicies(ctx, sec, ptype, rules)
 }
 
+func (a *Adapter) removePolicies(ctx context.Context, sec string, ptype string, rules [][]string) error {
+	for _, rule := range rules {
+		if err := a.removePolicy(ctx, sec, ptype, rule); err != nil {
+			return fmt.Errorf("cannot remove policy: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // RemovePolicies implements persist.BatchAdapter.
 func (a *Adapter) RemovePolicies(sec string, ptype string, rules [][]string) error {
-	panic("unimplemented")
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.removePolicies(ctx, sec, ptype, rules)
 }
 
 // AddPolicyCtx implements persist.ContextAdapter.
