@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -31,9 +32,20 @@ func main() {
 		}
 	}()
 
+	tx, err := conn.Begin(sigCtx)
+	if err != nil {
+		slog.Error("failed to begin transaction", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer func() {
+		if err := tx.Rollback(sigCtx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			slog.Warn("failed to rollaback transaction", slog.String("error", err.Error()))
+		}
+	}()
+
 	a, err := adapter.NewFiltered(
 		sigCtx,
-		conn,
+		tx,
 		adapter.WithTableName("casbin_rule_test"),
 		adapter.WithBatchSize(3),
 	)
@@ -97,6 +109,11 @@ func main() {
 		[]string{"alice", "data3", "read"},
 	); err != nil {
 		slog.Error("failed to remove named policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	if err := tx.Commit(sigCtx); err != nil {
+		slog.Error("failed to commit transaction", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
