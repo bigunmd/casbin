@@ -56,14 +56,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if _, err := e.RemoveNamedPolicy(
-		"p",
-		[]string{"alice", "data1", "read"},
-	); err != nil {
-		slog.Error("failed to remove named policy", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-
 	if _, err := e.AddNamedPolicies(
 		"p",
 		[][]string{
@@ -82,4 +74,29 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("alice can read data1", slog.Bool("ok", ok))
+
+	if _, err := e.UpdateNamedPolicy(
+		"p",
+		[]string{"alice", "data1", "read"},
+		[]string{"alice", "data3", "read"},
+	); err != nil {
+		slog.Error("failed to update policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	slog.Info("updated alice's policy")
+
+	ok, err = e.Enforce("alice", "data1", "read")
+	if err != nil {
+		slog.Error("failed to enforce policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	slog.Info("alice cannot read data1", slog.Bool("ok", ok))
+
+	if _, err := e.RemoveNamedPolicy(
+		"p",
+		[]string{"alice", "data3", "read"},
+	); err != nil {
+		slog.Error("failed to remove named policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 }

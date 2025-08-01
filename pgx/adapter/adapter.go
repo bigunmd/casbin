@@ -30,6 +30,32 @@ type casbinRule struct {
 	V5    string `db:"v5"`
 }
 
+func (c *casbinRule) slice() []string {
+	policy := make([]string, 0)
+	if c.Ptype != "" {
+		policy = append(policy, c.Ptype)
+	}
+	if c.V0 != "" {
+		policy = append(policy, c.V0)
+	}
+	if c.V1 != "" {
+		policy = append(policy, c.V1)
+	}
+	if c.V2 != "" {
+		policy = append(policy, c.V2)
+	}
+	if c.V3 != "" {
+		policy = append(policy, c.V3)
+	}
+	if c.V4 != "" {
+		policy = append(policy, c.V4)
+	}
+	if c.V5 != "" {
+		policy = append(policy, c.V5)
+	}
+	return policy
+}
+
 type filter struct {
 	Ptype []string
 	V0    []string
@@ -57,9 +83,8 @@ var _ persist.BatchAdapter = (*Adapter)(nil)
 var _ persist.ContextBatchAdapter = (*Adapter)(nil)
 var _ persist.FilteredAdapter = (*Adapter)(nil)
 var _ persist.ContextFilteredAdapter = (*Adapter)(nil)
-
-// var _ persist.UpdatableAdapter
-// var _ persist.ContextUpdatableAdapter
+var _ persist.UpdatableAdapter = (*Adapter)(nil)
+var _ persist.ContextUpdatableAdapter = (*Adapter)(nil)
 
 type Option func(*Adapter) error
 
@@ -102,6 +127,167 @@ type Adapter struct {
 	timeout    time.Duration
 	batchSize  uint
 	isFiltered bool
+}
+
+// UpdateFilteredPoliciesCtx implements persist.ContextUpdatableAdapter.
+func (a *Adapter) UpdateFilteredPoliciesCtx(ctx context.Context, sec string, ptype string, newRules [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
+	return a.updateFilteredPolicies(ctx, sec, ptype, newRules, fieldIndex, fieldValues...)
+}
+
+// UpdatePoliciesCtx implements persist.ContextUpdatableAdapter.
+func (a *Adapter) UpdatePoliciesCtx(ctx context.Context, sec string, ptype string, oldRules [][]string, newRules [][]string) error {
+	return a.updatePolicies(ctx, sec, ptype, oldRules, newRules)
+}
+
+// UpdatePolicyCtx implements persist.ContextUpdatableAdapter.
+func (a *Adapter) UpdatePolicyCtx(ctx context.Context, sec string, ptype string, oldRule []string, newRule []string) error {
+	return a.updatePolicy(ctx, sec, ptype, oldRule, newRule)
+}
+
+func (a *Adapter) updateFilteredPolicies(ctx context.Context, sec string, ptype string, newRules [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
+	line := casbinRule{Ptype: ptype}
+	if fieldIndex <= 0 && 0 < fieldIndex+len(fieldValues) {
+		line.V0 = fieldValues[0-fieldIndex]
+	}
+	if fieldIndex <= 1 && 1 < fieldIndex+len(fieldValues) {
+		line.V1 = fieldValues[1-fieldIndex]
+	}
+	if fieldIndex <= 2 && 2 < fieldIndex+len(fieldValues) {
+		line.V2 = fieldValues[2-fieldIndex]
+	}
+	if fieldIndex <= 3 && 3 < fieldIndex+len(fieldValues) {
+		line.V3 = fieldValues[3-fieldIndex]
+	}
+	if fieldIndex <= 4 && 4 < fieldIndex+len(fieldValues) {
+		line.V4 = fieldValues[4-fieldIndex]
+	}
+	if fieldIndex <= 5 && 5 < fieldIndex+len(fieldValues) {
+		line.V5 = fieldValues[5-fieldIndex]
+	}
+
+	// Selecting old rules matching filter
+	sqb := sq.Select(
+		"id",
+		"ptype",
+		"v0",
+		"v1",
+		"v2",
+		"v3",
+		"v4",
+		"v5",
+	).
+		From(a.tableName).
+		Where(sq.Eq{"ptype": line.Ptype})
+	if line.V0 != "" {
+		sqb = sqb.Where(sq.Eq{"v0": line.V0})
+	}
+	if line.V1 != "" {
+		sqb = sqb.Where(sq.Eq{"v1": line.V1})
+	}
+	if line.V2 != "" {
+		sqb = sqb.Where(sq.Eq{"v2": line.V2})
+	}
+	if line.V3 != "" {
+		sqb = sqb.Where(sq.Eq{"v3": line.V3})
+	}
+	if line.V4 != "" {
+		sqb = sqb.Where(sq.Eq{"v4": line.V4})
+	}
+	if line.V5 != "" {
+		sqb = sqb.Where(sq.Eq{"v5": line.V5})
+	}
+	sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("cannot build select policy rule query: %w", err)
+	}
+	rows, err := a.conn.Query(ctx, sql, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("cannot query select policy rule query: %w", err)
+	}
+	oldLines, err := pgx.CollectRows(rows, pgx.RowToStructByName[casbinRule])
+	if err != nil {
+		return nil, fmt.Errorf("cannot collect rows: %w", err)
+	}
+
+	// Deleting old rules matching filter
+	if err := a.rawDelete(ctx, line); err != nil {
+		return nil, fmt.Errorf("cannot raw delete policy rule: %w", err)
+	}
+
+	// Inserting new rules
+	if err := a.addPolicies(ctx, sec, ptype, newRules); err != nil {
+		return nil, fmt.Errorf("cannot add policies: %w", err)
+	}
+
+	var oldPolicies [][]string
+	for _, oldLine := range oldLines {
+		oldPolicies = append(oldPolicies, oldLine.slice())
+	}
+
+	return oldPolicies, nil
+}
+
+// UpdateFilteredPolicies implements persist.UpdatableAdapter.
+func (a *Adapter) UpdateFilteredPolicies(sec string, ptype string, newRules [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.updateFilteredPolicies(ctx, sec, ptype, newRules, fieldIndex, fieldValues...)
+}
+
+func (a *Adapter) updatePolicies(ctx context.Context, sec string, ptype string, oldRules [][]string, newRules [][]string) error {
+	if len(oldRules) != len(newRules) {
+		return errors.New("must provide equal number of old and new rules")
+	}
+	for idx, oldRule := range oldRules {
+		if err := a.updatePolicy(ctx, sec, ptype, oldRule, newRules[idx]); err != nil {
+			return fmt.Errorf("cannot update policy: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// UpdatePolicies implements persist.UpdatableAdapter.
+func (a *Adapter) UpdatePolicies(sec string, ptype string, oldRules [][]string, newRules [][]string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.updatePolicies(ctx, sec, ptype, oldRules, newRules)
+}
+
+func (a *Adapter) updatePolicy(ctx context.Context, sec string, ptype string, oldRule []string, newRule []string) error {
+	oldLine := a.savePolicyLine(ptype, oldRule)
+	newLine := a.savePolicyLine(ptype, newRule)
+	sql, arguments, err := sq.Update(a.tableName).
+		Set("ptype", newLine.Ptype).
+		Set("v0", newLine.V0).
+		Set("v1", newLine.V1).
+		Set("v2", newLine.V2).
+		Set("v3", newLine.V3).
+		Set("v4", newLine.V4).
+		Set("v5", newLine.V5).
+		Where(sq.Eq{"ptype": oldLine.Ptype}).
+		Where(sq.Eq{"v0": oldLine.V0}).
+		Where(sq.Eq{"v1": oldLine.V1}).
+		Where(sq.Eq{"v2": oldLine.V2}).
+		Where(sq.Eq{"v3": oldLine.V3}).
+		Where(sq.Eq{"v4": oldLine.V4}).
+		Where(sq.Eq{"v5": oldLine.V5}).
+		PlaceholderFormat(sq.Dollar).ToSql()
+	if err != nil {
+		return fmt.Errorf("cannot create update policy rule query: %w", err)
+	}
+	if _, err := a.conn.Exec(ctx, sql, arguments...); err != nil {
+		return fmt.Errorf("cannot execute update policy rule query: %w", err)
+	}
+
+	return nil
+}
+
+// UpdatePolicy implements persist.UpdatableAdapter.
+func (a *Adapter) UpdatePolicy(sec string, ptype string, oldRule []string, newRule []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
+	defer cancel()
+	return a.updatePolicy(ctx, sec, ptype, oldRule, newRule)
 }
 
 // IsFilteredCtx implements persist.ContextFilteredAdapter.
@@ -153,22 +339,22 @@ func (a *Adapter) loadFilteredPolicy(ctx context.Context, model model.Model, fil
 			sqb = sqb.Where(sq.Eq{"ptype": f.Ptype})
 		}
 		if len(f.V0) > 0 {
-			sqb = sqb.Where(sq.Eq{"V0": f.V0})
+			sqb = sqb.Where(sq.Eq{"v0": f.V0})
 		}
 		if len(f.V1) > 0 {
-			sqb = sqb.Where(sq.Eq{"V1": f.V1})
+			sqb = sqb.Where(sq.Eq{"v1": f.V1})
 		}
 		if len(f.V2) > 0 {
-			sqb = sqb.Where(sq.Eq{"V2": f.V2})
+			sqb = sqb.Where(sq.Eq{"v2": f.V2})
 		}
 		if len(f.V3) > 0 {
-			sqb = sqb.Where(sq.Eq{"V3": f.V3})
+			sqb = sqb.Where(sq.Eq{"v3": f.V3})
 		}
 		if len(f.V4) > 0 {
-			sqb = sqb.Where(sq.Eq{"V4": f.V4})
+			sqb = sqb.Where(sq.Eq{"v4": f.V4})
 		}
 		if len(f.V5) > 0 {
-			sqb = sqb.Where(sq.Eq{"V5": f.V5})
+			sqb = sqb.Where(sq.Eq{"v5": f.V5})
 		}
 		sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
 		if err != nil {
@@ -511,16 +697,16 @@ func (a *Adapter) rawDelete(ctx context.Context, line casbinRule) error {
 		sqb = sqb.Where(sq.Eq{"v1": line.V1})
 	}
 	if line.V2 != "" {
-		sqb = sqb.Where(sq.Eq{"V2": line.V2})
+		sqb = sqb.Where(sq.Eq{"v2": line.V2})
 	}
 	if line.V3 != "" {
-		sqb = sqb.Where(sq.Eq{"V3": line.V3})
+		sqb = sqb.Where(sq.Eq{"v3": line.V3})
 	}
 	if line.V4 != "" {
-		sqb = sqb.Where(sq.Eq{"V4": line.V4})
+		sqb = sqb.Where(sq.Eq{"v4": line.V4})
 	}
 	if line.V5 != "" {
-		sqb = sqb.Where(sq.Eq{"V5": line.V5})
+		sqb = sqb.Where(sq.Eq{"v5": line.V5})
 	}
 	sql, arguments, err := sqb.PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
