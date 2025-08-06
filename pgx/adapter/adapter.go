@@ -19,7 +19,7 @@ const (
 	defaultBatchSize = 1000
 )
 
-type casbinRule struct {
+type CasbinRule struct {
 	ID    uint   `db:"id"`
 	Ptype string `db:"ptype"`
 	V0    string `db:"v0"`
@@ -30,7 +30,7 @@ type casbinRule struct {
 	V5    string `db:"v5"`
 }
 
-func (c *casbinRule) slice() []string {
+func (c *CasbinRule) slice() []string {
 	policy := make([]string, 0)
 	if c.Ptype != "" {
 		policy = append(policy, c.Ptype)
@@ -56,7 +56,7 @@ func (c *casbinRule) slice() []string {
 	return policy
 }
 
-type filter struct {
+type Filter struct {
 	Ptype []string
 	V0    []string
 	V1    []string
@@ -66,8 +66,8 @@ type filter struct {
 	V5    []string
 }
 
-type batchFilter struct {
-	filters []filter
+type BatchFilter struct {
+	Filters []Filter
 }
 
 type PgConn interface {
@@ -145,7 +145,7 @@ func (a *Adapter) UpdatePolicyCtx(ctx context.Context, sec string, ptype string,
 }
 
 func (a *Adapter) updateFilteredPolicies(ctx context.Context, sec string, ptype string, newRules [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
-	line := casbinRule{Ptype: ptype}
+	line := CasbinRule{Ptype: ptype}
 	if fieldIndex <= 0 && 0 < fieldIndex+len(fieldValues) {
 		line.V0 = fieldValues[0-fieldIndex]
 	}
@@ -204,7 +204,7 @@ func (a *Adapter) updateFilteredPolicies(ctx context.Context, sec string, ptype 
 	if err != nil {
 		return nil, fmt.Errorf("cannot query select policy rule query: %w", err)
 	}
-	oldLines, err := pgx.CollectRows(rows, pgx.RowToStructByName[casbinRule])
+	oldLines, err := pgx.CollectRows(rows, pgx.RowToStructByName[CasbinRule])
 	if err != nil {
 		return nil, fmt.Errorf("cannot collect rows: %w", err)
 	}
@@ -305,26 +305,26 @@ func (a *Adapter) IsFiltered() bool {
 	return a.isFiltered
 }
 
-func (a *Adapter) loadFilteredPolicy(ctx context.Context, model model.Model, filt interface{}) error {
-	bf := batchFilter{
-		filters: []filter{},
+func (a *Adapter) loadFilteredPolicy(ctx context.Context, model model.Model, filter interface{}) error {
+	bf := BatchFilter{
+		Filters: []Filter{},
 	}
-	switch filterValue := filt.(type) {
-	case filter:
-		bf.filters = []filter{filterValue}
-	case *filter:
-		bf.filters = []filter{*filterValue}
-	case []filter:
-		bf.filters = filterValue
-	case batchFilter:
+	switch filterValue := filter.(type) {
+	case Filter:
+		bf.Filters = []Filter{filterValue}
+	case *Filter:
+		bf.Filters = []Filter{*filterValue}
+	case []Filter:
+		bf.Filters = filterValue
+	case BatchFilter:
 		bf = filterValue
-	case *batchFilter:
+	case *BatchFilter:
 		bf = *filterValue
 	default:
 		return errors.New("unsupported filter type")
 	}
 
-	for _, f := range bf.filters {
+	for _, f := range bf.Filters {
 		sqb := sq.Select(
 			"id",
 			"ptype",
@@ -364,7 +364,7 @@ func (a *Adapter) loadFilteredPolicy(ctx context.Context, model model.Model, fil
 		if err != nil {
 			return fmt.Errorf("cannot execute select filtered casbin rule query: %w", err)
 		}
-		rules, err := pgx.CollectRows(rows, pgx.RowToStructByName[casbinRule])
+		rules, err := pgx.CollectRows(rows, pgx.RowToStructByName[CasbinRule])
 		if err != nil {
 			return fmt.Errorf("cannot collect rows: %w", err)
 		}
@@ -400,7 +400,7 @@ func (a *Adapter) RemovePoliciesCtx(ctx context.Context, sec string, ptype strin
 }
 
 func (a *Adapter) addPolicies(ctx context.Context, sec string, ptype string, rules [][]string) error {
-	var lines []casbinRule
+	var lines []CasbinRule
 	for _, rule := range rules {
 		lines = append(lines, a.savePolicyLine(ptype, rule))
 	}
@@ -532,7 +532,7 @@ func (a *Adapter) AddPolicy(sec string, ptype string, rule []string) error {
 	return a.addPolicy(ctx, sec, ptype, rule)
 }
 
-func (a *Adapter) preview(rules []casbinRule, model model.Model) error {
+func (a *Adapter) preview(rules []CasbinRule, model model.Model) error {
 	j := 0
 	for i, rule := range rules {
 		r := []string{
@@ -566,7 +566,7 @@ func (a *Adapter) preview(rules []casbinRule, model model.Model) error {
 	return nil
 }
 
-func loadPolicyLine(r casbinRule, model model.Model) error {
+func loadPolicyLine(r CasbinRule, model model.Model) error {
 	var p = []string{
 		r.Ptype,
 		r.V0,
@@ -610,7 +610,7 @@ func (a *Adapter) loadPolicy(ctx context.Context, model model.Model) error {
 	if err != nil {
 		return fmt.Errorf("cannot execute select casbin rule query: %w", err)
 	}
-	rules, err := pgx.CollectRows(rows, pgx.RowToStructByName[casbinRule])
+	rules, err := pgx.CollectRows(rows, pgx.RowToStructByName[CasbinRule])
 	if err != nil {
 		return fmt.Errorf("cannot collect rows: %w", err)
 	}
@@ -644,7 +644,7 @@ func checkFieldValues(fieldValues ...string) error {
 }
 
 func (a *Adapter) removeFilteredPolicy(ctx context.Context, sec string, ptype string, fieldIndex int, fieldValues ...string) error {
-	var line casbinRule
+	var line CasbinRule
 	line.Ptype = ptype
 
 	if fieldIndex == -1 {
@@ -688,7 +688,7 @@ func (a *Adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int,
 	return a.removeFilteredPolicy(ctx, sec, ptype, fieldIndex, fieldValues...)
 }
 
-func (a *Adapter) rawDelete(ctx context.Context, line casbinRule) error {
+func (a *Adapter) rawDelete(ctx context.Context, line CasbinRule) error {
 	sqb := sq.Delete(a.tableName).Where(sq.Eq{"ptype": line.Ptype})
 	if line.V0 != "" {
 		sqb = sqb.Where(sq.Eq{"v0": line.V0})
@@ -743,8 +743,8 @@ func (a *Adapter) truncateTable(ctx context.Context) error {
 	return nil
 }
 
-func (a *Adapter) savePolicyLine(ptype string, rule []string) casbinRule {
-	var line casbinRule
+func (a *Adapter) savePolicyLine(ptype string, rule []string) CasbinRule {
+	var line CasbinRule
 	line.Ptype = ptype
 	if len(rule) > 0 {
 		line.V0 = rule[0]
@@ -773,7 +773,7 @@ func (a *Adapter) savePolicy(ctx context.Context, model model.Model) error {
 		return fmt.Errorf("cannot truncate table: %w", err)
 	}
 
-	var lines []casbinRule
+	var lines []CasbinRule
 	for ptype, ast := range model["p"] {
 		for _, rule := range ast.Policy {
 			lines = append(lines, a.savePolicyLine(ptype, rule))
